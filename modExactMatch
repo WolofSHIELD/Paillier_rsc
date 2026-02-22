@@ -1,0 +1,29 @@
+// =========================================================
+// Module ExactMatch — re-exports publics
+// =========================================================
+
+mod exactmatch;
+
+// ── Crates utilisées par le module ────────────────────────
+pub use num_bigint::BigUint;
+pub use num_bigint::RandBigInt;
+pub use rand_core::OsRng;
+pub use std::collections::{HashMap, HashSet};
+
+// ── Types ─────────────────────────────────────────────────
+pub use exactmatch::CfSnd;
+pub use exactmatch::SparseTable;
+pub use exactmatch::MaskBundle;
+
+// ── Constantes ────────────────────────────────────────────
+pub use exactmatch::HASH_BITS;
+pub use exactmatch::TABLE_SIZE;
+
+// ── Fonctions ─────────────────────────────────────────────
+pub use exactmatch::simple_hash;
+pub use exactmatch::load_nss_from_csv;
+pub use exactmatch::phase0_keygen;
+pub use exactmatch::phase1_build_table;
+pub use exactmatch::phase2_generate_masks;
+pub use exactmatch::phase3_server_compute;
+pub use exactmatch::phase4_decrypt_and_count;
