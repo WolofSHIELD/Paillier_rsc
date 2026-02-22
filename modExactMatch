@@ -11,6 +11,7 @@ pub use rand_core::OsRng;
 pub use std::collections::{HashMap, HashSet};
 
 // ── Types ─────────────────────────────────────────────────
+pub use exactmatch::CfFst;
 pub use exactmatch::CfSnd;
 pub use exactmatch::SparseTable;
 pub use exactmatch::MaskBundle;
