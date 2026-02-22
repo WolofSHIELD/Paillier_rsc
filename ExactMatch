@@ -1,0 +1,263 @@
+// =========================================================
+// ExactMatch — Version Production (Serveur Central)
+// Protocole PSI via Catalano-Fiore (Forme Seconde)
+// ClickNCrypt Technical Series 2026 · v1.0
+// =========================================================
+
+use num_bigint::BigUint;
+use num_bigint::RandBigInt;
+use rand_core::OsRng;
+use std::time::Instant;
+use std::collections::{HashMap, HashSet};
+
+use paillier_crypto::fiore_catalano::cf_encrypt::cf_encrypt::cf_encrypt;
+use paillier_crypto::fiore_catalano::cf_mul::cf_mul::cf_mul;
+use paillier_crypto::fiore_catalano::cf_mul_dec::cf_mul_dec::cf_mul_dec;
+use paillier_crypto::paillier::p_keygen::p_keygen::p_keygen;
+use paillier_crypto::paillier::p_encrypt::p_encrypt::p_encrypt;
+use paillier_crypto::KeyPair;
+
+// ─────────────────────────────────────────────────────────
+// Constantes
+// ─────────────────────────────────────────────────────────
+
+pub const HASH_BITS: usize = 10;           // 2^10 = 1024 positions dans la table
+pub const TABLE_SIZE: usize = 1 << HASH_BITS;
+
+// ─────────────────────────────────────────────────────────
+// Types publics
+// ─────────────────────────────────────────────────────────
+
+/// Chiffré CF Forme Seconde : (c0_snd, c1_snd, c2_snd)
+pub type CfSnd = (BigUint, BigUint, BigUint);
+
+/// Table creuse : seules les positions actives (t[i]=1) sont stockées.
+/// Toute position absente vaut implicitement 0.
+pub struct SparseTable {
+    pub active: HashSet<usize>,
+}
+
+impl SparseTable {
+    /// Construit la table à partir d'une liste de NSS (strings).
+    /// t[simple_hash(nss)] = 1  pour chaque nss de la base.
+    pub fn build(nss_list: &[String]) -> Self {
+        let mut active = HashSet::new();
+        for nss in nss_list {
+            active.insert(simple_hash(nss));
+        }
+        SparseTable { active }
+    }
+
+    pub fn contains(&self, pos: usize) -> bool {
+        self.active.contains(&pos)
+    }
+
+    pub fn len(&self) -> usize {
+        self.active.len()
+    }
+}
+
+/// Masques d'une BD pour Phase 2 :
+///   masks_clear : { position → b_i en clair }     (secret, gardé par la BD)
+///   masks_enc   : { position → P.Enc_pk(b_i) }    (envoyé aux autres parties)
+pub struct MaskBundle {
+    pub masks_clear: HashMap<usize, BigUint>,
+    pub masks_enc:   HashMap<usize, BigUint>,
+}
+
+// ─────────────────────────────────────────────────────────
+// Fonction de hachage (§2.1 — JS-like 32-bit sur HASH_BITS bits)
+// h : {0,1}* -> {0,1}^HASH_BITS
+// ─────────────────────────────────────────────────────────
+
+pub fn simple_hash(s: &str) -> usize {
+    let mut h: u32 = 0;
+    for ch in s.chars() {
+        h = h.wrapping_shl(7).wrapping_sub(h).wrapping_add(ch as u32);
+    }
+    (h as usize) & (TABLE_SIZE - 1)
+}
+
+// ─────────────────────────────────────────────────────────
+// Chargement du CSV -> colonne NSS uniquement
+// ─────────────────────────────────────────────────────────
+
+/// Lit un fichier CSV et retourne Vec<String> des valeurs NSS.
+/// Le hash est recalculé à la volée par simple_hash(nss).
+pub fn load_nss_from_csv(path: &str) -> Vec<String> {
+    use std::fs::File;
+    use std::io::{BufRead, BufReader};
+
+    let file = File::open(path)
+        .unwrap_or_else(|e| panic!("Impossible d'ouvrir {} : {}", path, e));
+    let reader = BufReader::new(file);
+    let mut lines = reader.lines();
+
+    let header = lines.next().expect("Fichier vide").expect("Erreur lecture");
+    let cols: Vec<&str> = header.split(',').collect();
+    let nss_col = cols.iter().position(|c| c.trim() == "NSS")
+        .expect("Colonne 'NSS' introuvable");
+
+    lines
+        .filter_map(|line| {
+            let line = line.ok()?;
+            let val = line.split(',').nth(nss_col)?.trim().to_string();
+            if val.is_empty() { None } else { Some(val) }
+        })
+        .collect()
+}
+
+// ─────────────────────────────────────────────────────────
+// Phase 0 — Génération des clés
+// ─────────────────────────────────────────────────────────
+
+pub fn phase0_keygen(label: &str, bits: u64) -> KeyPair {
+    println!("  [Phase 0] {} : génération des clés ({} bits)...", label, bits);
+    let t = Instant::now();
+    let kp = p_keygen(bits);
+    println!("  [Phase 0] {} : clés générées en {:.3?}", label, t.elapsed());
+    kp
+}
+
+// ─────────────────────────────────────────────────────────
+// Phase 1 — Construction des tables de bits creuses (Algo 1 du PDF)
+// ─────────────────────────────────────────────────────────
+//
+// Pour chaque nss ∈ BDk :
+//   t[simple_hash(nss)] <- 1
+// Toute position non listée vaut implicitement 0.
+
+pub fn phase1_build_table(label: &str, nss_list: &[String]) -> SparseTable {
+    println!(
+        "  [Phase 1] {} : construction de la table creuse ({} NSS, TABLE_SIZE={})...",
+        label, nss_list.len(), TABLE_SIZE
+    );
+    let table = SparseTable::build(nss_list);
+    println!(
+        "  [Phase 1] {} : {} position(s) active(s) sur {} — t[i]=1.",
+        label, table.len(), TABLE_SIZE
+    );
+    table
+}
+
+// ─────────────────────────────────────────────────────────
+// Phase 2 — Échange croisé des masques chiffrés (3.3 du PDF)
+// ─────────────────────────────────────────────────────────
+
+pub fn phase2_generate_masks(label: &str, table: &SparseTable, kp: &KeyPair) -> MaskBundle {
+    println!(
+        "  [Phase 2] {} : génération + chiffrement de {} masques sous pk{}...",
+        label, table.len(), label
+    );
+    let mut rng = OsRng;
+    let mut masks_clear = HashMap::with_capacity(table.len());
+    let mut masks_enc   = HashMap::with_capacity(table.len());
+
+    for &pos in &table.active {
+        let b_i     = rng.gen_biguint_below(&kp.public_key.n);
+        let enc_b_i = p_encrypt(&b_i, &kp.public_key);
+        masks_clear.insert(pos, b_i);
+        masks_enc.insert(pos, enc_b_i);
+    }
+
+    println!("  [Phase 2] {} : {} masques prêts.", label, masks_clear.len());
+    MaskBundle { masks_clear, masks_enc }
+}
+
+// ─────────────────────────────────────────────────────────
+// Phase 3 — Calcul homomorphe — Serveur neutre (Algo 2 du PDF)
+// ─────────────────────────────────────────────────────────
+//
+// Pour chaque position i telle que t[i]=1 ET t'[i]=1 :
+//   Ft  = CF.Enc_pk(1, a1)   a1 <- $ Z_N
+//   Ft' = CF.Enc_pk(1, a2)   a2 <- $ Z_N
+//   sf  = CF.Mul(Ft, Ft', pk)  -> Forme Seconde de 1·1 = 1
+
+pub fn phase3_server_compute(
+    table1: &SparseTable,
+    table2: &SparseTable,
+    kp1:    &KeyPair,
+    kp2:    &KeyPair,
+) -> (Vec<(usize, CfSnd)>, Vec<(usize, CfSnd)>) {
+
+    println!("  [Phase 3] Serveur : calcul homomorphe CF...");
+    let t_start = Instant::now();
+
+    let common: Vec<usize> = table1.active
+        .iter()
+        .copied()
+        .filter(|pos| table2.contains(*pos))
+        .collect();
+
+    println!(
+        "  [Phase 3] Serveur : {} position(s) commune(s) (t[i]=1 * t'[i]=1).",
+        common.len()
+    );
+
+    let one = BigUint::from(1u32);
+    let mut rng = OsRng;
+    let mut result_bd1: Vec<(usize, CfSnd)> = Vec::with_capacity(common.len());
+    let mut result_bd2: Vec<(usize, CfSnd)> = Vec::with_capacity(common.len());
+
+    for pos in &common {
+        // ── BD1 sous pk1 ─────────────────────────────────────────────
+        let a1 = rng.gen_biguint_below(&kp1.public_key.n);
+        let a2 = rng.gen_biguint_below(&kp1.public_key.n);
+        let ft_1  = cf_encrypt(&one, &a1, &kp1.public_key);
+        let ftp_1 = cf_encrypt(&one, &a2, &kp1.public_key);
+        let sf1   = cf_mul(&ft_1, &ftp_1, &kp1.public_key);
+
+        // ── BD2 sous pk2 ─────────────────────────────────────────────
+        let b1 = rng.gen_biguint_below(&kp2.public_key.n);
+        let b2 = rng.gen_biguint_below(&kp2.public_key.n);
+        let ft_2  = cf_encrypt(&one, &b1, &kp2.public_key);
+        let ftp_2 = cf_encrypt(&one, &b2, &kp2.public_key);
+        let sf2   = cf_mul(&ft_2, &ftp_2, &kp2.public_key);
+
+        result_bd1.push((*pos, sf1));
+        result_bd2.push((*pos, sf2));
+    }
+
+    println!(
+        "  [Phase 3] Serveur : terminé en {:.3?} ({} multiplication(s) CF).",
+        t_start.elapsed(), common.len()
+    );
+    (result_bd1, result_bd2)
+}
+
+// ─────────────────────────────────────────────────────────
+// Phase 4 — Déchiffrement Forme Seconde + comptage (Algo 3 du PDF)
+// ─────────────────────────────────────────────────────────
+//
+// CF.Dec₂ : p_i = [ P.Dec(c0'') + P.Dec(c1'')·P.Dec(c2'') ] mod N
+// Si p_i = 1 -> position commune -> patient en commun détecté.
+
+pub fn phase4_decrypt_and_count(
+    label:      &str,
+    aggregated: &[(usize, CfSnd)],
+    kp:         &KeyPair,
+) -> usize {
+    println!(
+        "  [Phase 4] {} : déchiffrement CF Forme Seconde ({} terme(s))...",
+        label, aggregated.len()
+    );
+    let t_start = Instant::now();
+    let one = BigUint::from(1u32);
+    let mut count = 0usize;
+
+    for (pos, sf) in aggregated {
+        let p_i = cf_mul_dec(sf, &kp.public_key, &kp.secret_key);
+        if p_i == one {
+            count += 1;
+            println!("   position {:>6} : p_i = 1  (patient commun)", pos);
+        } else {
+            println!("   position {:>6} : p_i = {} (inattendu)", pos, p_i);
+        }
+    }
+
+    println!(
+        "  [Phase 4] {} : terminé en {:.3?} → {} patient(s) commun(s).",
+        label, t_start.elapsed(), count
+    );
+    count
+}
