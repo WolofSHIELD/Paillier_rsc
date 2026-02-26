@@ -1,36 +1,6 @@
 // =========================================================
 // ExactMatch — Version Corrigée (Serveur Central)
 // Protocole PSI via Catalano-Fiore (Forme Seconde)
-// ClickNCrypt Technical Series 2026 · v1.0
-//
-// CORRECTIONS APPLIQUÉES vs version initiale :
-//
-//  [C1] HASH_BITS : 10 → 30 bits (TABLE_SIZE = 2^30)
-//       Conformément au PDF §2.1 : h : {0,1}* → {0,1}^30.
-//       Avec 10 bits et n=30 000 NSS, on avait ~29 collisions
-//       par position en moyenne → faux positifs massifs.
-//
-//  [C2] Phase 2 : masques générés pour TOUTES les positions
-//       actives ET transmis au serveur (MaskBundle passé en
-//       paramètre de phase3_server_compute).
-//
-//  [C3] Phase 3 : le serveur utilise bi et b'i reçus de BD1/BD2
-//       pour construire Ft et Ft' (CF.Enc(t[i], bi)) au lieu
-//       de générer ses propres masques aléatoires locaux.
-//       Sans ça, BD1 et BD2 ne peuvent pas annuler le terme
-//       bi*b'i lors du déchiffrement → résultat faux.
-//
-//  [C4] Phase 3 : agrégation homomorphe CF.Add des Formes
-//       Secondes pour produire un chiffré agrégé unique par BD.
-//       Le serveur renvoyait auparavant une liste de chiffrés
-//       individuels → BD1/BD2 apprenaient quelles positions
-//       étaient communes (violation de sécurité).
-//
-//  [C5] Phase 4 : déchiffrement via cf_add_dec (Forme Première,
-//       2 composantes) sur le chiffré agrégé unique, conformément
-//       à l'Algorithme 3 du PDF (pi = c0 + P.Dec(c1) mod N).
-//       L'ancienne version utilisait cf_mul_dec (Forme Seconde,
-//       3 composantes) sur chaque chiffré individuel.
 // =========================================================
 
 use num_bigint::BigUint;
@@ -39,20 +9,21 @@ use rand_core::OsRng;
 use std::time::Instant;
 use std::collections::{HashMap, HashSet};
 
-use paillier_crypto::fiore_catalano::cf_encrypt::cf_encrypt::cf_encrypt;
-use paillier_crypto::fiore_catalano::cf_mul::cf_mul::cf_mul;
-use paillier_crypto::fiore_catalano::cf_add::cf_add::cf_add;
-use paillier_crypto::fiore_catalano::cf_add::cf_add_dec::cf_add_dec;
-use paillier_crypto::paillier::p_keygen::p_keygen::p_keygen;
-use paillier_crypto::paillier::p_encrypt::p_encrypt::p_encrypt;
-use paillier_crypto::KeyPair;
+use crate::fiore_catalano::cf_encrypt::cf_encrypt::cf_encrypt;
+use crate::fiore_catalano::cf_mul::cf_mul::cf_mul;
+use crate::fiore_catalano::cf_mul_dec::cf_mul_dec::cf_mul_dec;
+use crate::fiore_catalano::cf_add::cf_add::cf_add;
+use crate::fiore_catalano::cf_add::cf_add_dec::cf_add_dec;
+use crate::paillier::p_keygen::p_keygen::p_keygen;
+use crate::paillier::p_encrypt::p_encrypt::p_encrypt;
+use crate::paillier::p_keygen::p_keygen::KeyPair;
 
 // ─────────────────────────────────────────────────────────
-// [C1] Constantes — HASH_BITS corrigé à 30 (PDF §2.1)
+// [C1] Constantes — HASH_BITS
 // ─────────────────────────────────────────────────────────
 
 /// Nombre de bits de la fonction de hachage.
-/// PDF §2.1 : h : {0,1}* → {0,1}^30, TABLE_SIZE = 2^30.
+/// h : {0,1}* → {0,1}^30, TABLE_SIZE = 2^30.
 /// Avec n = 30 000 NSS et TABLE_SIZE = 2^30 ≈ 1 milliard,
 /// la probabilité de collision est négligeable (~2.8×10⁻⁵).
 pub const HASH_BITS: usize = 30;
@@ -62,12 +33,12 @@ pub const TABLE_SIZE: usize = 1 << HASH_BITS;  // 2^30 = 1 073 741 824
 // Types publics
 // ─────────────────────────────────────────────────────────
 
-/// Chiffré CF Forme Première : (c0, c1)
+/// Chiffré CF Première Forme : (c0, c1)
 /// c0 = [m - b]_N  (en clair),  c1 = P.Enc(b)
 pub type CfFst = (BigUint, BigUint);
 
-/// Chiffré CF Forme Seconde : (c0'', c1'', c2'')
-/// Produit par CF.Mul — déchiffrement via CF.Dec₂
+/// Chiffré CF Seconde Forme : (c0'', c1'', c2'')
+/// Produit par CF.Mul — déchiffrement via CF.Dec
 pub type CfSnd = (BigUint, BigUint, BigUint);
 
 /// Table creuse : seules les positions actives (t[i]=1) sont stockées.
@@ -94,13 +65,25 @@ impl SparseTable {
     pub fn len(&self) -> usize {
         self.active.len()
     }
+    /// Retourne les positions communes entre `self` et `other`.
+    /// Itère sur l'ensemble le plus petit pour être plus efficace.
+    pub fn common_positions(&self, other: &SparseTable) -> Vec<usize> {
+        let (small, big) = if self.active.len() <= other.active.len() {
+            (&self.active, &other.active)
+        } else {
+            (&other.active, &self.active)
+        };
+        let mut res = Vec::with_capacity(small.len());
+        for &pos in small.iter() {
+            if big.contains(&pos) {
+                res.push(pos);
+            }
+        }
+        res
+    }
 }
 
-/// [C2] Masques d'une BD :
-///   masks_clear : { position → bi en clair }       — gardé secret par la BD
-///   masks_enc   : { position → P.Enc_pk(bi) }      — envoyé au serveur et à l'autre BD
-///
-/// PDF §3.3 : les masques sont générés pour toutes les positions actives
+/// les masques sont générés pour toutes les positions actives
 /// et échangés de façon croisée avant tout calcul homomorphe.
 pub struct MaskBundle {
     pub masks_clear: HashMap<usize, BigUint>,  // bi en clair (secret)
@@ -108,7 +91,7 @@ pub struct MaskBundle {
 }
 
 // ─────────────────────────────────────────────────────────
-// Fonction de hachage — PDF §2.1
+// Fonction de hachage — PDF 
 // h : {0,1}* → {0,1}^HASH_BITS  (JS-like 32-bit tronqué)
 // ─────────────────────────────────────────────────────────
 
@@ -149,7 +132,7 @@ pub fn load_nss_from_csv(path: &str) -> Vec<String> {
 }
 
 // ─────────────────────────────────────────────────────────
-// Phase 0 — Génération des clés (PDF §3.1)
+// Phase 0 — Génération des clés
 // ─────────────────────────────────────────────────────────
 
 pub fn phase0_keygen(label: &str, bits: u64) -> KeyPair {
@@ -157,11 +140,11 @@ pub fn phase0_keygen(label: &str, bits: u64) -> KeyPair {
     let t = Instant::now();
     let kp = p_keygen(bits);
     println!("  [Phase 0] {} : clés générées en {:.3?}", label, t.elapsed());
-    kp
+    kp.expect("Error")
 }
 
 // ─────────────────────────────────────────────────────────
-// Phase 1 — Construction des tables de bits creuses (PDF Algo 1)
+// Phase 1 — Construction des tables de bits creuses
 // ─────────────────────────────────────────────────────────
 
 pub fn phase1_build_table(label: &str, nss_list: &[String]) -> SparseTable {
@@ -178,13 +161,7 @@ pub fn phase1_build_table(label: &str, nss_list: &[String]) -> SparseTable {
 }
 
 // ─────────────────────────────────────────────────────────
-// Phase 2 — Échange croisé des masques chiffrés (PDF §3.3)
-//
-// [C2] Chaque BD génère un masque bi pour chaque position active
-// et le chiffre sous sa propre clé publique.
-// Le MaskBundle est retourné pour être transmis :
-//   - masks_enc   → au Serveur et à l'autre BD (public)
-//   - masks_clear → gardé secret par la BD propriétaire
+// Phase 2 — Échange croisé des masques chiffrés
 // ─────────────────────────────────────────────────────────
 
 pub fn phase2_generate_masks(label: &str, table: &SparseTable, kp: &KeyPair) -> MaskBundle {
@@ -206,122 +183,90 @@ pub fn phase2_generate_masks(label: &str, table: &SparseTable, kp: &KeyPair) -> 
     }
 
     println!(
-        "  [Phase 2] {} : {} masques prêts → masks_enc transmis au Serveur et à l'autre BD.",
+        "  [Phase 2] {} : {} masques prêts -> masks_enc transmis au Serveur et à l'autre BD.",
         label, masks_clear.len()
     );
     MaskBundle { masks_clear, masks_enc }
 }
 
 // ─────────────────────────────────────────────────────────
-// Phase 3 — Calcul homomorphe + agrégation (PDF Algo 2)
-//
-// [C3] Le serveur utilise bi (de bundle1) et b'i (de bundle2)
-//      — reçus de BD1/BD2 via Phase 2 — pour construire :
-//        Ft  = CF.Enc_pk1(t[i], bi)   = ([t[i]-bi]_N, P.Enc(bi))
-//        Ft' = CF.Enc_pk2(t'[i], b'i) = ([t'[i]-b'i]_N, P.Enc(b'i))
-//      puis CF.Mul(Ft, Ft') → Forme Seconde de t[i]*t'[i].
-//
-// [C4] Les Formes Secondes sont agrégées via CF.Add position par
-//      position pour produire UN SEUL chiffré agrégé par BD :
-//        C_BD1 = CF.Add(CF.Add(...)) sous pk1
-//        C_BD2 = CF.Add(CF.Add(...)) sous pk2
-//      → BD1/BD2 ne reçoivent que le cardinal, pas les positions.
+// Phase 3 — Calcul homomorphe + agrégation
 // ─────────────────────────────────────────────────────────
 
 pub fn phase3_server_compute(
     table1:  &SparseTable,
     table2:  &SparseTable,
-    bundle1: &MaskBundle,    // [C3] masques de BD1 (bi)
-    bundle2: &MaskBundle,    // [C3] masques de BD2 (b'i)
+    bundle1: &MaskBundle,    // masques de BD1 (bi)
+    bundle2: &MaskBundle,    // masques de BD2 (b'i)
     kp1:     &KeyPair,
     kp2:     &KeyPair,
-) -> (CfFst, CfFst) {       // [C4] un seul agrégat par BD (Forme Première)
+) -> (CfFst, CfFst) {       // un seul agrégat par BD (Forme Première)
 
     println!("  [Phase 3] Serveur : calcul homomorphe CF...");
     let t_start = Instant::now();
 
     // Positions communes : t[i]=1 ET t'[i]=1
-    let common: Vec<usize> = table1.active
-        .iter()
-        .copied()
-        .filter(|pos| table2.contains(*pos))
-        .collect();
+    let common: Vec<usize> = table1.common_positions(table2);
 
     println!(
-        "  [Phase 3] Serveur : {} position(s) commune(s) (t[i]=1 ∧ t'[i]=1).",
+        "  [Phase 3] Serveur : {} position(s) commune(s) (t[i]=1 ^ t'[i]=1).",
         common.len()
     );
 
     // Valeur neutre pour CF.Add : CF.Enc(0) = (0, P.Enc(0)) = (0, 1) sous Paillier
-    // P.Enc(0) = g^0 * r^n mod n² = r^n, mais on peut utiliser l'identité additive :
     // un accumulateur à 0 en Forme Première = (0, 1_paillier).
-    // En pratique on initialise à None et on insère le premier terme directement.
     let mut agg_bd1: Option<CfFst> = None;
     let mut agg_bd2: Option<CfFst> = None;
 
     let one = BigUint::from(1u32);
 
     for pos in &common {
-        // ── [C3] Récupérer bi et b'i depuis les MaskBundles reçus de BD1/BD2 ──
+        // Récupérer bi et b'i depuis les MaskBundles reçus de BD1/BD2 ──
         let bi = bundle1.masks_clear.get(pos)
             .expect("Position active dans table1 mais bi absent du bundle1");
         let bi_p = bundle2.masks_clear.get(pos)
             .expect("Position active dans table2 mais b'i absent du bundle2");
 
-        // ── [C3] Construire Ft = CF.Enc_pk1(t[i]=1, bi) et Ft' = CF.Enc_pk2(t'[i]=1, b'i)
-        // t[i] = 1 et t'[i] = 1 garantis par le filtre sur `common`
-        let ft  = cf_encrypt(&one, bi,   &kp1.public_key)
-            .expect("CF.Enc BD1 Phase 3 échoué");
-        let ft_p = cf_encrypt(&one, bi_p, &kp2.public_key)
-            .expect("CF.Enc BD2 Phase 3 échoué");
+        // Construire CF.Encrypt pour les deux masques sous CHAQUE PK
 
-        // ── CF.Mul : Forme Seconde de t[i] * t'[i] ──────────────────────────
-        // Résultat : chiffré de t[i]*t'[i] = 1*1 = 1 (si position commune)
-        // Forme Seconde (3 composantes) → sera réduite à Forme Première par CF.Add
-        let sf1 = cf_mul(&ft,   &ft,   &kp1.public_key)
+        let ft1  = cf_encrypt(&one, bi,   &kp1.public_key)
+            .expect("CF.Enc BD1 Phase 3 échoué");
+        let ft1_p = cf_encrypt(&one, bi_p, &kp1.public_key)
+            .expect("CF.Enc BD1 (masque BD2 sous pk1) Phase 3 échoué");
+
+        let ft2  = cf_encrypt(&one, bi,   &kp2.public_key)
+            .expect("CF.Enc BD2 Phase 3 échoué");
+        let ft2_p = cf_encrypt(&one, bi_p, &kp2.public_key)
+            .expect("CF.Enc BD2 (masque BD1 sous pk2) Phase 3 échoué");
+
+        // Multiplication sous pk1 et pk2 séparément → deux Formes Seconde
+        let sf1 = cf_mul(&ft1,  &ft1_p, &kp1.public_key)
             .expect("CF.Mul BD1 Phase 3 échoué");
-        let sf2 = cf_mul(&ft_p, &ft_p, &kp2.public_key)
+        let sf2 = cf_mul(&ft2,  &ft2_p, &kp2.public_key)
             .expect("CF.Mul BD2 Phase 3 échoué");
 
-        // ── [C4] Réduction Forme Seconde → Forme Première pour l'agrégation ─
-        // CF.Mul produit (c0'', c1'', c2'') — Forme Seconde.
-        // Pour agréger avec CF.Add (qui opère sur des Formes Premières),
-        // on reconstruit la Forme Première équivalente :
-        //   c0_fst = c0''  (déjà un chiffré Paillier de t[i]*t'[i] - bi*b'i)
-        //   c1_fst = c1''  (P.Enc(bi))
-        // La composante c2'' = P.Enc(b'i) est intégrée lors du déchiffrement.
-        //
-        // NOTE : l'agrégation correcte de Formes Secondes nécessite CF.AddSnd
-        // (addition de triplets). Ici on utilise une représentation intermédiaire :
-        // on extrait (c0'', c1'') comme Forme Première provisoire pour CF.Add,
-        // ce qui est valide car CF.Dec₁(c0'', c1'') = P.Dec(c0'') + P.Dec(c1'')
-        // = (t[i]*t'[i] - bi*b'i) + bi = t[i]*t'[i] - b'i*(t[i]-1)... 
-        //
-        // Approche correcte conforme au PDF : on travaille directement avec
-        // les Formes Premières produites par CF.Enc (avant CF.Mul) et on agrège
-        // les produits scalaires. CF.Mul étant appliqué sur t[i]∈{0,1},
-        // le résultat est directement utilisable comme Forme Première :
-        //   c0_fst = c0'' = P.Enc(t[i]*t'[i] - bi*b'i) sous Paillier
-        //   c1_fst = P.Enc(bi)  (c1'' du triplet)
-        // CF.Dec₁ donne : P.Dec(c0'') + P.Dec(c1'') = t[i]*t'[i] - bi*b'i + bi
-        // ... ce qui n'est pas t[i]*t'[i] sans b'i.
-        //
-        // Implémentation correcte : on reconstruit la Forme Première via
-        // le déchiffrement intermédiaire de c2'' = P.Enc(b'i) intégré dans c0'' :
-        // c0_new = c0'' * c2''^{-1*c1''} — complexe sans clé secrète côté serveur.
-        //
-        // Alternative correcte (implémentée ici) : on encode directement
-        // CF.Enc(1, bi) comme Forme Première et on agrège AVANT CF.Mul,
-        // conformément à l'Algo 2 du PDF qui agrège les Formes Secondes :
-        //   C_BDk ← CF.Add(C_BDk, (c0'', c1'', c2''))
-        // On représente l'agrégation de Formes Secondes comme une somme de
-        // Formes Premières (c0'', c1'') en ignorant c2'' car le déchiffrement
-        // Phase 4 via cf_add_dec = c0 + P.Dec(c1) absorbe bi correctement.
+        // DEBUG: déchiffrer localement les Formes Seconde pour inspection
+        // (utile pour tester ; en production le serveur ne a pas les SK).
+        if common.len() <= 10 {
+            let dec1 = cf_mul_dec(&sf1, &kp1.public_key, &kp1.secret_key)
+                .expect("cf_mul_dec BD1 échoué");
+            let dec2 = cf_mul_dec(&sf2, &kp2.public_key, &kp2.secret_key)
+                .expect("cf_mul_dec BD2 échoué");
+            println!("    [DEBUG !] pos={} bi={} b'i={} -> dec_sf1={} dec_sf2={}",
+                pos, bi, bi_p, dec1, dec2);
+        }
 
-        // Forme Première extraite du triplet Forme Seconde :
-        // (c0'', c1'') où c0'' = P.Enc(t[i]*t'[i] - bi*b'i) et c1'' = P.Enc(bi)
-        let fst1: CfFst = (sf1.0, sf1.1);  // (c0'', c1'') pour BD1
-        let fst2: CfFst = (sf2.0, sf2.1);  // (c0'', c1'') pour BD2
+        
+
+        //   (ou Enc(b'i) par bi) car Enc(m)^k = Enc(k*m).
+        let fst1_c0 = sf1.0.clone(); // Enc( t*t' - bi*b'i ) sous pk1
+        let fst1_c1 = sf1.1.modpow(bi_p, &kp1.public_key.n_squared); // Enc(bi*b'i) sous pk1
+
+        let fst2_c0 = sf2.0.clone(); // Enc( t*t' - bi*b'i ) sous pk2
+        let fst2_c1 = sf2.2.modpow(bi, &kp2.public_key.n_squared); // Enc(bi*b'i) sous pk2
+
+        let fst1: CfFst = (fst1_c0, fst1_c1);
+        let fst2: CfFst = (fst2_c0, fst2_c1);
 
         // [C4] Agrégation homomorphe CF.Add — accumulation position par position
         agg_bd1 = Some(match agg_bd1 {
@@ -356,16 +301,12 @@ pub fn phase3_server_compute(
 
 // ─────────────────────────────────────────────────────────
 // Phase 4 — Déchiffrement Forme Première + comptage (PDF Algo 3)
-//
-// [C5] Le chiffré agrégé est une Forme Première (2 composantes).
-//      Déchiffrement : pi = c0 + P.Dec(sk, c1) mod N
-//      (cf_add_dec, pas cf_mul_dec)
-//      pi = Σ t[i]*t'[i] = |BD1 ∩ BD2|
+//      pi = Σ t[i]*t'[i] = |BD1 ^ BD2|
 // ─────────────────────────────────────────────────────────
 
 pub fn phase4_decrypt_and_count(
     label:    &str,
-    agg:      &CfFst,   // [C5] chiffré agrégé Forme Première unique
+    agg:      &CfFst,   
     kp:       &KeyPair,
 ) -> usize {
     println!(
@@ -374,8 +315,7 @@ pub fn phase4_decrypt_and_count(
     );
     let t_start = Instant::now();
 
-    // [C5] Déchiffrement Forme Première : pi = c0 + P.Dec(c1) mod N
-    // pi = Σ t[i]*t'[i] = |BD1 ∩ BD2|
+    // pi = Σ t[i]*t'[i] = |BD1 ^ BD2|
     let cardinal = cf_add_dec(agg, &kp.public_key, &kp.secret_key)
         .expect("cf_add_dec Phase 4 échoué");
 
@@ -386,7 +326,7 @@ pub fn phase4_decrypt_and_count(
         .unwrap_or(0) as usize;
 
     println!(
-        "  [Phase 4] {} : terminé en {:.3?} → cardinal déchiffré = {}",
+        "  [Phase 4] {} : terminé en {:.3?} -> cardinal déchiffré = {}",
         label, t_start.elapsed(), count
     );
     count
