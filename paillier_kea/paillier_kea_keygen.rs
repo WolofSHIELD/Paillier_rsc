@@ -3,7 +3,7 @@ use num_traits::One;
 use rand_core::OsRng;
 use crate::paillier::p_keygen::PublicKey;
 use crate::paillier::p_encrypt::p_encrypt::p_encrypt;
-use crate::crypto_error::CryptoError;
+use crate::crypto_error::crypto_error::CryptoError;
 
 // ============================================================================
 // Paire de clés KEA (schéma P^(2), section 6.2 du papier)

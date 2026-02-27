@@ -2,7 +2,7 @@ use num_bigint::BigUint;
 use crate::paillier::p_decrypt::p_decrypt::p_decrypt;
 use crate::paillier::p_keygen::p_keygen::SecretKey;
 use crate::paillier::p_keygen::PublicKey;
-use crate::crypto_error::CryptoError;
+use crate::crypto_error::crypto_error::CryptoError;
 
 
 

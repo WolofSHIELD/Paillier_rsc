@@ -3,10 +3,10 @@ use num_traits::{One, Zero};
 use num_integer::Integer;
 use rand_core::OsRng;
 use rand_core::RngCore;
-use crate::crypto_error::CryptoError;
+use crate::crypto_error::crypto_error::CryptoError;
 
 // Taille minimale de clé acceptée en production
-pub const MIN_KEY_BITS: u64 = 1024;
+pub const MIN_KEY_BITS: u64 = 128;
 
 // ---------------------------------------------------------------------------
 // Table de petits premiers (crible préliminaire, couvre jusqu'à 2999)
@@ -69,44 +69,12 @@ pub fn gcd(a: &BigUint, b: &BigUint) -> BigUint {
 
 // ---------------------------------------------------------------------------
 // Nombre de rounds Miller-Rabin
-//
-// FIX PERFORMANCE (Bug #1) :
-// 20 rounds était largement excessif et représentait la majeure partie du
-// temps de génération. Pour des safe primes, la sécurité est assurée par
-// la taille du nombre, pas par le nombre de rounds MR.
-// NIST SP 800-90B / FIPS 186-5 recommande :
-//   - 5 rounds pour 1024 bits
-//   - 4 rounds pour 2048 bits
-// On utilise 5 rounds uniformément (conservateur et ~4x plus rapide).
 // ---------------------------------------------------------------------------
 fn miller_rabin_rounds(_nbits: u64) -> u32 {
     5
 }
 
-// ---------------------------------------------------------------------------
-// Génère un nombre premier de Sophie Germain p' et retourne le safe prime
-// p = 2p' + 1, tous deux premiers, avec p de exactement `nbits` bits.
-//
-// FIX PERFORMANCE (Bug #2) — Crible combiné avant Miller-Rabin :
-// Avant, le code testait p' avec MR complet (20 rounds), PUIS vérifiait si
-// 2p'+1 était divisible par des petits premiers. Résultat : énormément de
-// tests MR coûteux pour des candidats éliminables en O(1).
-//
-// Correction : on pré-filtre p' ET 2p'+1 simultanément contre tous les
-// petits premiers AVANT tout test de Miller-Rabin. Cette optimisation élimine
-// ~80 % des candidats à coût quasi nul, réduisant le temps de génération
-// d'un facteur ~10x à ~20x.
-//
-// FIX TAILLE (Bug #3) — Garantie de exactement `nbits` bits pour p :
-// Le code original forçait uniquement le MSB de p' (bit nbits-2), ce qui
-// garantissait que p' ∈ [2^(nbits-2), 2^(nbits-1) - 1]. Cependant, si p'
-// était proche de 2^(nbits-2), le safe prime p = 2p'+1 pouvait avoir son
-// bit le plus significatif à nbits-1 mais très bas dans la plage, et dans
-// de rares cas de contraction arithmétique, n = p*q pouvait avoir 2*nbits-1
-// bits au lieu de 2*nbits.
-//
-// Correction : on force AUSSI le second bit de p' (bit nbits-3), garantissant
-// p' ∈ [3*2^(nbits-3), 2^(nbits-1) - 1]. Ainsi p ∈ [3*2^(nbits-2)+1, 2^nbits-1]
+
 // et n = p*q a toujours exactement 2*nbits bits.
 // ---------------------------------------------------------------------------
 pub fn generate_safe_prime(nbits: u64) -> Result<BigUint, CryptoError> {
@@ -129,33 +97,20 @@ pub fn generate_safe_prime(nbits: u64) -> Result<BigUint, CryptoError> {
     let rounds = miller_rabin_rounds(nbits);
 
     loop {
-        // --- Génération de p' de exactement (nbits - 1) bits -------------
-        // gen_biguint(k) génère un entier dans [0, 2^k - 1].
-        // On force les deux bits les plus hauts pour garantir :
-        //   p' ∈ [3·2^(nbits-3), 2^(nbits-1) - 1]  (plage haute, MSB fixé)
-        // Cela assure que p = 2p'+1 a exactement `nbits` bits, et que
+     
         // n = p·q a exactement 2·nbits bits (pas 2·nbits - 1).
         let mut sophie_germain = rng.gen_biguint(nbits - 1);
         sophie_germain.set_bit(nbits - 2, true); // MSB de p' (garantit nbits-1 bits)
         sophie_germain.set_bit(nbits - 3, true); // Second bit haut (garantit plage supérieure)
-        sophie_germain.set_bit(0, true);          // Force impair
+        sophie_germain.set_bit(0, true);         
 
-        // --- Crible combiné p' ET 2p'+1 AVANT Miller-Rabin (FIX PERFORMANCE) ---
-        //
-        // Pour chaque petit premier sp, on vérifie :
-        //   (a) p' mod sp != 0  (p' n'est pas divisible par sp)
-        //   (b) (2p'+1) mod sp != 0  (safe prime ne l'est pas non plus)
-        //
-        // La condition (b) se calcule sans construire 2p'+1 :
-        //   (2p'+1) mod sp = (2 * (p' mod sp) + 1) mod sp
-        //
-        // Ce crible combiné élimine ~80 % des candidats en O(nombre de petits premiers),
-        // sans aucun modpow coûteux.
+       
         if combined_sieve(&sophie_germain) {
             continue;
         }
 
-        // --- Miller-Rabin sur p' (FIX : 5 rounds au lieu de 20) ----------
+        // --- Miller-Rabin sur p' ----------
+
         if !is_probable_prime(&sophie_germain, rounds, &mut rng) {
             continue;
         }
@@ -163,8 +118,7 @@ pub fn generate_safe_prime(nbits: u64) -> Result<BigUint, CryptoError> {
         // --- Construction et test de p = 2p' + 1 -------------------------
         let safe_prime = (&sophie_germain << 1) + BigUint::one();
 
-        // Le crible a déjà éliminé les facteurs triviaux de safe_prime.
-        // On fait uniquement Miller-Rabin pour confirmer la primalité.
+      
         if is_probable_prime(&safe_prime, rounds, &mut rng) {
             // Vérification de cohérence : s'assurer que safe_prime a bien nbits bits
             debug_assert_eq!(
@@ -179,13 +133,7 @@ pub fn generate_safe_prime(nbits: u64) -> Result<BigUint, CryptoError> {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Crible combiné : élimine p' si p' OU 2p'+1 est divisible par un petit premier.
-//
-// Retourne true si le candidat doit être REJETÉ (divisible par un petit premier).
-//
-// Optimisation clé : (2p'+1) mod sp = (2*(p' mod sp) + 1) mod sp
-// calculé sans construire 2p'+1 ni faire de BigUint modulo complet.
+
 // ---------------------------------------------------------------------------
 fn combined_sieve(sophie_germain: &BigUint) -> bool {
     for &sp in SMALL_PRIMES {
@@ -199,7 +147,6 @@ fn combined_sieve(sophie_germain: &BigUint) -> bool {
         // Calcule p' mod sp comme u64 (sp < 3000, donc le reste tient en u64)
         let rem_biguint = sophie_germain % &bp;
         // to_u32_digits() retourne les chiffres en base 2^32, little-endian
-        // Pour sp < 3000, le reste tient largement dans un u32
         let digits = rem_biguint.to_u32_digits();
         let r: u64 = if digits.is_empty() { 0 } else { digits[0] as u64 };
 

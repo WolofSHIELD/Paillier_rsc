@@ -3,7 +3,7 @@ use num_traits::One;
 use rand_core::OsRng;
 use crate::paillier::p_keygen::PublicKey;
 use crate::paillier::math::gcd;
-use crate::crypto_error::CryptoError;
+use crate::crypto_error::crypto_error::CryptoError;
 
 
 // ---------------------------------------------------------------------------

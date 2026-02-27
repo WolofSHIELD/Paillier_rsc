@@ -1,9 +1,11 @@
 // Déclaration des modules
 pub mod crypto_error;
 pub mod paillier;
+//pub mod exactmatch;
 pub mod fiore_catalano;
 pub mod key_management;
 pub mod paillier_kea;
+pub mod montgomery;
 
 pub use crate::paillier::math;
 pub use crate::paillier::p_keygen;
@@ -17,7 +19,7 @@ pub use crate::paillier::math::{l_function, gcd, generate_safe_prime, mod_invers
 pub use p_keygen::p_keygen::{SecretKey, KeyPair};
 
 // Erreur centralisée
-pub use crypto_error::CryptoError;
+pub use crypto_error::crypto_error::CryptoError;
 
 // Registre de clés thread-safe — point d'entrée pour les serveurs multi-threadés
 pub use key_management::{KeyRegistry, RegistryError};

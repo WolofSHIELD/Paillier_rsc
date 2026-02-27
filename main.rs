@@ -9,6 +9,8 @@ use paillier_crypto::paillier::p_keygen::p_keygen::p_keygen;
 use paillier_crypto::paillier::p_encrypt::p_encrypt::p_encrypt;
 use paillier_crypto::paillier::p_decrypt::p_decrypt::p_decrypt;
 
+// ── Montgomery (utilisé dans les deux cryptosystèmes) ──────────────────────────────
+use paillier_crypto::montgomery::montgomery::multiple_precision_mul;
 // ── Catalano-Fiore ────────────────────────────────────────
 use paillier_crypto::fiore_catalano::cf_encrypt::cf_encrypt::cf_encrypt;
 use paillier_crypto::fiore_catalano::cf_add::cf_add::cf_add;
@@ -28,8 +30,10 @@ use paillier_crypto::CryptoError;
 use paillier_crypto::KeyPair;
 
 // ── Stdlib & crates externes ──────────────────────────────
-use num_bigint::{BigUint, RandBigInt};
+
+use rand::Rng;
 use rand_core::OsRng;
+use num_bigint::{BigUint, RandBigInt};
 use std::io::{self, Write};
 use std::time::Instant;
 
@@ -239,10 +243,10 @@ fn demonstration_catalano_fiore() -> Result<(), AppError> {
     println!("  Cryptosystème Catalano-Fiore — Démonstration");
     println!("==============================================");
 
-    let (kp, duree_keygen) = charger_ou_generer_cles(1024)?;
+    let (kp, _duree_keygen) = charger_ou_generer_cles(1024)?;
     afficher_cles(&kp);
 
-	let mut rng = OsRng;
+    let mut rng = OsRng;
 
     let m1 = rng.gen_biguint_below(&kp.public_key.n);
     let m2 = rng.gen_biguint_below(&kp.public_key.n);
@@ -250,8 +254,8 @@ fn demonstration_catalano_fiore() -> Result<(), AppError> {
     let b1 = rng.gen_biguint_below(&kp.public_key.n); // masque aléatoire de m1
     let b2 = rng.gen_biguint_below(&kp.public_key.n); // masque aléatoire de m2
 
-    println!("\n  m1 = {} bits", m1.bits());
-    println!("  m2 = {} bits", m2.bits());
+    //println!("\n  m1 = {} bits", m1.bits());
+    //println!("  m2 = {} bits", m2.bits());
 
     // cf_encrypt retourne Result<(BigUint, BigUint), CryptoError>
     let t             = Instant::now();
@@ -309,7 +313,10 @@ fn demonstration_catalano_fiore() -> Result<(), AppError> {
     println!("Le produit des deux message est {:?}", dec_mul);
     println!("  Déchiffrement produit CF  : {:.3?}", duree_mul_dec);
 
+    let t = Instant::now();
     let produit_attendu = (&m1 * &m2) % &kp.public_key.n;
+    let duree_verif = t.elapsed();
+
     if dec_mul == produit_attendu {
         println!("  Multiplication CF vérifiée : D(CF.Mul(E(m1), E(m2))) = m1*m2");
     } else {
@@ -319,12 +326,13 @@ fn demonstration_catalano_fiore() -> Result<(), AppError> {
     println!("\n==============================================");
     println!("    RÉSUMÉ DES TEMPS — Catalano-Fiore");
     println!("==============================================");
-    match duree_keygen {
+   /*  match duree_keygen {
         Some(d) => println!("  Génération des clés           : {:.3?}  (nouvelle génération)", d),
         None    => println!("  Génération des clés           : —  (chargées depuis le disque)"),
     }
-
-    println!("Le produit initial est {:?}", m1*m2);
+ */
+    println!("Le produit initial est {:?}", (&m1*&m2) % &kp.public_key.n);
+    println!("  La durée du produit en clair es : {:.3?}", duree_verif);
     println!("  Chiffrement CF m1             : {:.3?}", duree_enc_cf1);
     println!("  Chiffrement CF m2             : {:.3?}", duree_enc_cf2);
     println!("  Addition homomorphique CF     : {:.3?}", duree_add);
@@ -332,6 +340,15 @@ fn demonstration_catalano_fiore() -> Result<(), AppError> {
     println!("  Multiplication homomorphique  : {:.3?}", duree_mul);
     println!("  Déchiffrement multiplication  : {:.3?}", duree_mul_dec);
     println!("==============================================");
+
+
+    let t = Instant::now();
+    let produit = multiple_precision_mul(&m1, &m2, &kp.public_key)?;
+    let duree_mul_clair = t.elapsed();
+    println!("Le produit de m1 et m2 est : {:?}, la durée {:?}", produit, duree_mul_clair);
+    println!("La duréee de la multiplication en clair est : {:.3?}", duree_mul);
+
+
 
     Ok(())
 }

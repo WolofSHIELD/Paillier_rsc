@@ -5,7 +5,7 @@ use std::io;
 use num_bigint::BigUint;
 use num_traits::Num;
 use crate::paillier::p_keygen::{PublicKey, SecretKey, KeyPair};
-use crate::crypto_error::CryptoError;
+use crate::crypto_error::crypto_error::CryptoError;
 
 // ============================================================================
 // Protection DoS parsing — limites de taille des entrées

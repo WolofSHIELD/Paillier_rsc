@@ -1,0 +1,114 @@
+// =========================================================
+// main.rs — ExactMatch PSI Catalano-Fiore
+// ClickNCrypt Technical Series 2026 · v1.0
+// =========================================================
+
+use paillier_crypto::exactmatch::{
+    load_nss_from_csv,
+    simple_hash,
+    phase0_keygen,
+    phase1_build_table,
+    phase2_generate_masks,
+    phase3_server_compute,
+    phase4_decrypt_and_count,
+};
+use std::collections::HashSet;
+use std::time::Instant;
+
+fn main() {
+    println!("\n╔══════════════════════════════════════════════════════╗");
+    println!("║   ExactMatch — PSI via Catalano-Fiore (Forme 2)      ║");
+    println!("║   ClickNCrypt Technical Series 2026 · v1.0           ║");
+    println!("╚══════════════════════════════════════════════════════╝\n");
+
+    // ── Chargement des CSV ────────────────────────────────────────────
+    let nss_a = load_nss_from_csv("base_A_2000_common750.csv");
+    let nss_b = load_nss_from_csv("base_B_2000_common750.csv");
+
+    println!("BD1 (base_A.csv) : {} NSS chargé(s)", nss_a.len());
+    println!("BD2 (base_B.csv) : {} NSS chargé(s)", nss_b.len());
+
+    // Vérification en clair : intersection réelle sur NSS (référence)
+    //let set_a: HashSet<&str> = nss_a.iter().map(String::as_str).collect();
+    //let set_b: HashSet<&str> = nss_b.iter().map(String::as_str).collect();
+    //let common_nss: Vec<&&str> = set_a.intersection(&set_b).collect();
+
+    // Vérification sur les positions de hash (résultat attendu du protocole)
+    let hashes_a: HashSet<usize> = nss_a.iter().map(|s| simple_hash(s)).collect();
+    let hashes_b: HashSet<usize> = nss_b.iter().map(|s| simple_hash(s)).collect();
+    let common_hashes: Vec<usize> = hashes_a.intersection(&hashes_b).copied().collect();
+
+    //println!("\n[Vérif. en clair]");
+    //println!("  NSS communs          : {}", common_nss.len());
+    println!("  Positions communes   : {} (résultat attendu du protocole)", common_hashes.len());
+    println!("  (Le protocole PSI ne révèle que ce cardinal — aucun identifiant n'est exposé)\n");
+
+    let t_total = Instant::now();
+
+    // ── Phase 0 — Génération des clés ─────────────────────────────────
+    println!("═══ Phase 0 : Génération des clés ═══");
+    let kp1 = phase0_keygen("BD1", 128);  // 2048 bits en production
+    let kp2 = phase0_keygen("BD2", 128);
+
+    // ── Phase 1 — Construction des tables de bits creuses ─────────────
+    println!("\n═══ Phase 1 : Construction des tables de bits creuses ═══");
+    let table1 = phase1_build_table("BD1", &nss_a);
+    let table2 = phase1_build_table("BD2", &nss_b);
+
+    // ── Phase 2 — Échange croisé des masques chiffrés ─────────────────
+    // [C2] Les MaskBundles sont maintenant retournés et transmis en Phase 3.
+    // BD1 envoie bundle1.masks_enc -> Serveur + BD2
+    // BD2 envoie bundle2.masks_enc -> Serveur + BD1
+    println!("\n═══ Phase 2 : Échange croisé des masques chiffrés ═══");
+    let bundle1 = phase2_generate_masks("BD1", &table1, &kp1);
+    let bundle2 = phase2_generate_masks("BD2", &table2, &kp2);
+    println!("  BD1 -> Enc_pk1(bi)   transmis au Serveur et à BD2");
+    println!("  BD2 -> Enc_pk2(b'i)  transmis au Serveur et à BD1");
+
+    // ── Phase 3 — Calcul homomorphe + agrégation (Serveur neutre) ─────
+    // [C3] Le serveur reçoit les bundles pour utiliser bi et b'i.
+    // [C4] Retourne un chiffré agrégé unique (Forme Première) par BD.
+    println!("\n═══ Phase 3 : Calcul homomorphe — Serveur neutre ═══");
+    let (agg_bd1, agg_bd2) = phase3_server_compute(
+        &table1, &table2,
+        &bundle1, &bundle2,   // [C3] masques transmis au serveur
+        &kp1, &kp2,
+    );
+    println!("  C_BD1 (agrégat CF Forme Première) -> envoyé à BD1");
+    println!("  C_BD2 (agrégat CF Forme Première) -> envoyé à BD2");
+
+    // ── Phase 4 — Déchiffrement CF Forme Première + comptage ──────────
+    // [C5] Chaque BD déchiffre son agrégat unique et obtient directement |BD1 ∩ BD2|.
+    println!("\n═══ Phase 4 : Déchiffrement CF et comptage ═══");
+    let r1 = phase4_decrypt_and_count("BD1", &agg_bd1, &kp1);
+    let r2 = phase4_decrypt_and_count("BD2", &agg_bd2, &kp2);
+
+    // ── Résultat final ────────────────────────────────────────────────
+    println!("\n╔══════════════════════════════════════════════════════╗");
+    println!("║                  RÉSULTAT FINAL                      ║");
+    println!("╠══════════════════════════════════════════════════════╣");
+
+    if r1 == r2 {
+        println!("║  r1 = r2 = {} patient(s) en commun", r1);
+        println!("║  Cohérence BD1 / BD2 vérifiée (r1 == r2)");
+    } else {
+        println!("║  Incohérence : r1={}, r2={} (erreur de protocole)", r1, r2);
+    }
+
+    if r1 == common_hashes.len() {
+        println!("║  Résultat correct  (attendu : {})", common_hashes.len());
+    } else {
+        println!("║  Résultat incorrect  (attendu : {}, obtenu : {})", common_hashes.len(), r1);
+    }
+
+    println!("║");
+    println!("║  Temps total protocole : {:.3?}", t_total.elapsed());
+    println!("╚══════════════════════════════════════════════════════╝\n");
+
+    println!("Garanties de sécurité respectées :");
+    println!("  Serveur : voit t et t' (positions actives) + Enc(bi), Enc(b'i)");
+    println!("            calcule CF.Mul et agrège — ne déchiffre jamais");
+    println!("  BD1     : reçoit C_BD1 agrégé — voit uniquement r = |BD1 ^ BD2|");
+    println!("  BD2     : reçoit C_BD2 agrégé — voit uniquement r = |BD1 ^ BD2|");
+    println!("  CF.Mul  : masque croisé bi*b'i soustrait en homomorphe avant agrégation\n");
+}

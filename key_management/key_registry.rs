@@ -29,7 +29,7 @@
 use std::sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard};
 use crate::paillier::p_keygen::{PublicKey, SecretKey, KeyPair};
 use crate::paillier_kea::paillier_kea_keygen::KeyPairKEA;
-use crate::crypto_error::CryptoError;
+use crate::crypto_error::crypto_error::CryptoError;
 
 // ============================================================================
 // Erreurs spécifiques au registre

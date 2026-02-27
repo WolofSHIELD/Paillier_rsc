@@ -35,6 +35,10 @@ pub enum CryptoError {
     // --- Erreurs KEA ---
     /// La vérification d'image KEA a échoué (chiffré invalide ou falsifié)
     KeaImVerFailed,
+
+    InvalidInput(String), // Erreur générique pour les entrées invalides (ex: base zéro dans la fonction de représentation en base)
+
+
 }
 
 impl fmt::Display for CryptoError {
@@ -58,6 +62,9 @@ impl fmt::Display for CryptoError {
                 write!(f, "Fichier de clés incohérent : n_squared != n*n (corrompu ou falsifié)"),
             CryptoError::KeaImVerFailed =>
                 write!(f, "Vérification d'image KEA échouée : chiffré invalide ou falsifié"),
+            
+            CryptoError::InvalidInput(msg) =>
+                write!(f, "Entrée invalide : {msg}"),
         }
     }
 }
